@@ -7,37 +7,43 @@ import spotipy.util as util
 import spotipy.oauth2 as oauth2
 
 # TODO
-# names of playlists aren't matching correctly. IRL KALX: ....
+# do not create new playlist if playlist name exists
+# add tracks to existing playlist instead of creating new one
 # probably just need spotify_post instead of both spotify and spotify_post
-# move username to config file
-# iterate through kalx pages
 # are there playlists separated by DJ? That's probably better than by day
 # check to see if "first hit" is accurate enough. Can try to match album to search hits better (I think it doesn't work right now)
 # run script every 24 hours
 # refactor some of this garbage
 
-def main():
+def main(n):
     # web scraping
-    print "scraping kalx"
-    text = get_webpage_text()
-    soup = BeautifulSoup(text, 'html.parser')
-    songs_by_playlist = parse_playlists('table', 'sticky-enabled', soup)
+    print("scraping kalx")
 
     # spotify interaction
-    print "getting spotify"
-    spotify, spotify_post = set_up_spotify()
+    print("getting spotify")
+    spotify, spotify_post, username = set_up_spotify()
 
-    existing_playlist_names = get_playlist_names(spotify)
+    existing_playlist_names = get_playlist_names(spotify, username)
+    count = 0
 
-    create_playlists(songs_by_playlist, existing_playlist_names, spotify_post)
-    print 'finished!'
+    while count < n:
+        text = get_webpage_text(count)
+        soup = BeautifulSoup(text, 'html.parser')
+        songs_by_playlist = parse_playlists('table', 'sticky-enabled', soup)
+        create_playlists(songs_by_playlist, existing_playlist_names, spotify_post, username)
+        count += 1
+
+    print('finished!')
 
 
-def get_webpage_text(url=None):
-    if not url:
+def get_webpage_text(count):
+    base_url = 'https://www.kalx.berkeley.edu/playlists'
+    if not count:
         url = 'https://www.kalx.berkeley.edu/playlists'
+    else:
+        url = base_url + '?page={}'.format(count)
 
-    resp = requests.get(url)
+    resp = requests.get(url, verify=False)
     return resp.text
 
 
@@ -47,7 +53,7 @@ def parse_playlists(tag, html_class, soup):
     for container in containers:
         if not container.caption:
             continue
-        title = 'KALX: {}'.format(container.caption.text)
+        title = get_playlist_name(container.caption.text)
         all_song_rows[title] = []
         trs = container.find_all('tr')
         for tr in trs:
@@ -56,13 +62,15 @@ def parse_playlists(tag, html_class, soup):
                 continue
 
             song_data = process_song_row(song_row)
-            if all(s == '' for s in song_data.values()):
+            if not song_data:
                 continue
 
             all_song_rows[title].append(song_data)
 
     return all_song_rows
 
+def get_playlist_name(text):
+    return 'KALX: {}'.format(text)
 
 def process_song_row(row):
     song_data = row.text.strip(' \t\n\r').split('-')
@@ -70,7 +78,15 @@ def process_song_row(row):
     stripped = [ s.strip() for s in no_quotes ]
     data = [ re.sub(' ', '+', s) for s in stripped ]
 
-    return { 'artist': data[0], 'song': data[1], 'album': data[2] }
+    if not any(re.match('^[a-zA-Z0-9]+$', x) for x in data):
+        return None
+
+    if len(data) < 3:
+        album =  ''
+    else:
+        album = data[2]
+
+    return { 'artist': data[0], 'song': data[1], 'album': album }
 
 
 def set_up_spotify():
@@ -79,23 +95,22 @@ def set_up_spotify():
     client_id = config.get('SPOTIFY', 'CLIENT_ID')
     client_secret = config.get('SPOTIFY', 'CLIENT_SECRET')
     redirect_uri = config.get('SPOTIFY', 'REDIRECT_URI')
+    username = config.get('SPOTIFY', 'USERNAME')
     auth = oauth2.SpotifyClientCredentials(
         client_id=client_id,
         client_secret=client_secret
     )
     token = auth.get_access_token()
     spotify = spotipy.Spotify(auth=token)
-    print 'spotify created'
+    print('spotify created')
 
     scope = 'playlist-modify-public'
-    token = util.prompt_for_user_token('megan59', scope, client_id=client_id, client_secret=client_secret, redirect_uri=redirect_uri)
+    token = util.prompt_for_user_token(username, scope, client_id=client_id, client_secret=client_secret, redirect_uri=redirect_uri)
     spotify_post = spotipy.Spotify(auth=token)
-    return spotify, spotify_post
+    return spotify, spotify_post, username
 
-def get_playlist_names(spotify, username=None):
+def get_playlist_names(spotify, username):
     names = []
-    if not username:
-        username = 'megan59'
 
     playlists = spotify.user_playlists(username)
     for playlist in playlists['items']:
@@ -103,15 +118,15 @@ def get_playlist_names(spotify, username=None):
 
     return names
 
-def create_playlists(songs_by_playlist, existing_playlist_names, spotify_post):
+def create_playlists(songs_by_playlist, existing_playlist_names, spotify_post, username):
     for playlist_name in songs_by_playlist:
         if playlist_name in existing_playlist_names:
             continue
 
-        # create_new_playlist(playlist_name, spotify, 'megan59')
-        playlist_id = create_new_playlist(playlist_name, spotify_post, 'megan59')
+        create_new_playlist(playlist_name, spotify_post, username)
+        playlist_id = create_new_playlist(playlist_name, spotify_post, username)
         track_ids = get_track_ids(songs_by_playlist[playlist_name], spotify_post)
-        spotify_post.user_playlist_add_tracks('megan59', playlist_id, track_ids)
+        spotify_post.user_playlist_add_tracks(username, playlist_id, track_ids)
 
 
 
@@ -152,4 +167,4 @@ def extract_track_id(res, album):
     return track_id
 
 
-main()
+main(10)
