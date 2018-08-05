@@ -2,9 +2,9 @@ from bs4 import BeautifulSoup
 import configparser
 import requests
 import re
-import spotipy
-import spotipy.util as util
-import spotipy.oauth2 as oauth2
+
+from services.spotify import Spotify
+
 
 # TODO
 # do not create new playlist if playlist name exists
@@ -16,21 +16,25 @@ import spotipy.oauth2 as oauth2
 # refactor some of this garbage
 
 def main(n):
+    # spotify interaction
+    print("setting up spotify")
+
+    creds = parse_config()
+    spotify_service = Spotify(creds)
+    spotify_read = spotify_service.setup_read()
+    spotify_post = spotify_service.setup_write()
+
+    print("getting existing spotify playlist names")
+    existing_playlists = get_existing_playlist_data(spotify_read, spotify_service.username)
+
+    count = 0
     # web scraping
     print("scraping kalx")
-
-    # spotify interaction
-    print("getting spotify")
-    spotify, spotify_post, username = set_up_spotify()
-
-    existing_playlist_names = get_playlist_names(spotify, username)
-    count = 0
-
     while count < n:
         text = get_webpage_text(count)
         soup = BeautifulSoup(text, 'html.parser')
-        songs_by_playlist = parse_playlists('table', 'sticky-enabled', soup)
-        create_playlists(songs_by_playlist, existing_playlist_names, spotify_post, username)
+        songs_by_playlist = parse_html_playlists('table', 'sticky-enabled', soup)
+        send_html_playlists_to_spotify(songs_by_playlist, existing_playlists, spotify_post, spotify_read, spotify_service.username)
         count += 1
 
     print('finished!')
@@ -39,7 +43,7 @@ def main(n):
 def get_webpage_text(count):
     base_url = 'https://www.kalx.berkeley.edu/playlists'
     if not count:
-        url = 'https://www.kalx.berkeley.edu/playlists'
+        url = base_url
     else:
         url = base_url + '?page={}'.format(count)
 
@@ -47,7 +51,7 @@ def get_webpage_text(count):
     return resp.text
 
 
-def parse_playlists(tag, html_class, soup):
+def parse_html_playlists(tag, html_class, soup):
     containers = soup.find_all(tag, class_ = html_class)
     all_song_rows = {}
     for container in containers:
@@ -89,45 +93,53 @@ def process_song_row(row):
     return { 'artist': data[0], 'song': data[1], 'album': album }
 
 
-def set_up_spotify():
-    config = configparser.ConfigParser()
-    config.read('config.cfg')
-    client_id = config.get('SPOTIFY', 'CLIENT_ID')
-    client_secret = config.get('SPOTIFY', 'CLIENT_SECRET')
-    redirect_uri = config.get('SPOTIFY', 'REDIRECT_URI')
-    username = config.get('SPOTIFY', 'USERNAME')
-    auth = oauth2.SpotifyClientCredentials(
-        client_id=client_id,
-        client_secret=client_secret
-    )
-    token = auth.get_access_token()
-    spotify = spotipy.Spotify(auth=token)
-    print('spotify created')
-
-    scope = 'playlist-modify-public'
-    token = util.prompt_for_user_token(username, scope, client_id=client_id, client_secret=client_secret, redirect_uri=redirect_uri)
-    spotify_post = spotipy.Spotify(auth=token)
-    return spotify, spotify_post, username
-
-def get_playlist_names(spotify, username):
-    names = []
-
+def get_existing_playlist_data(spotify, username):
+    res = {}
     playlists = spotify.user_playlists(username)
     for playlist in playlists['items']:
-        names.append(playlist['name'])
+        res[playlist['name']] = playlist['id']
 
-    return names
+    return res
 
-def create_playlists(songs_by_playlist, existing_playlist_names, spotify_post, username):
+
+def send_html_playlists_to_spotify(songs_by_playlist, existing_playlists, spotify_post, spotify_read, username):
     for playlist_name in songs_by_playlist:
-        if playlist_name in existing_playlist_names:
-            continue
-
-        create_new_playlist(playlist_name, spotify_post, username)
-        playlist_id = create_new_playlist(playlist_name, spotify_post, username)
+        playlist_exists = False
         track_ids = get_track_ids(songs_by_playlist[playlist_name], spotify_post)
-        spotify_post.user_playlist_add_tracks(username, playlist_id, track_ids)
 
+        if playlist_name in existing_playlists.keys():
+            print('add tracks to existing playlist')
+            playlist_id = existing_playlists[playlist_name]
+            playlist_exists=True
+        else:
+            print('creating new playlist')
+            playlist_id = create_new_playlist(playlist_name, spotify_post, username)
+
+    add_tracks_to_playlist(track_ids, playlist_id, spotify_post, spotify_read, username, playlist_exists)
+
+
+def add_tracks_to_playlist(track_ids, playlist_id, spotify_post, spotify_read, username, playlist_exists):
+    if playlist_exists:
+        track_ids = filter_out_duplicate_tracks(username, playlist_id, track_ids, spotify_read)
+
+    try:
+        spotify_post.user_playlist_add_tracks(username, playlist_id, track_ids)
+    except Exception as e:
+        print(e)
+
+
+def filter_out_duplicate_tracks(username, playlist_id, track_ids, spotify_read):
+    unique_track_ids = []
+    existing_track_ids = []
+    existing_tracks = spotify_read.user_playlist_tracks(username, playlist_id=playlist_id)
+    for track_data in existing_tracks['items']:
+        existing_track_ids.append(track_data['track']['id'])
+
+    for track_id in track_ids:
+        if track_id not in existing_track_ids:
+            unique_track_ids.append(track_id)
+
+    return unique_track_ids
 
 
 def create_new_playlist(name, spotify, username):
@@ -167,4 +179,16 @@ def extract_track_id(res, album):
     return track_id
 
 
-main(10)
+def parse_config():
+    config = configparser.ConfigParser()
+    config.read('config.cfg')
+
+    return {
+        'client_id': config.get('SPOTIFY', 'CLIENT_ID'),
+        'client_secret': config.get('SPOTIFY', 'CLIENT_SECRET'),
+        'redirect_uri': config.get('SPOTIFY', 'REDIRECT_URI'),
+        'username': config.get('SPOTIFY', 'USERNAME')
+    }
+
+main(15)
+
